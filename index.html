@@ -5,6 +5,14 @@
 <meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
 <meta name="robots" content="noindex">
 <title>Mon budget</title>
+<link rel="manifest" href="manifest.webmanifest">
+<link rel="icon" type="image/png" sizes="192x192" href="icon-192.png">
+<link rel="apple-touch-icon" href="apple-touch-icon.png">
+<meta name="theme-color" content="#1F6B52">
+<meta name="mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-capable" content="yes">
+<meta name="apple-mobile-web-app-title" content="Budget">
+<meta name="apple-mobile-web-app-status-bar-style" content="default">
 <link rel="preconnect" href="https://fonts.googleapis.com">
 <link rel="stylesheet" href="https://fonts.googleapis.com/css2?family=Bricolage+Grotesque:opsz,wght@12..96,500;12..96,700&family=IBM+Plex+Sans:wght@400;500;600&display=swap">
 <style>
@@ -129,6 +137,10 @@ input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px s
 
 .backup { display: flex; flex-wrap: wrap; gap: 8px; align-items: center; }
 .backup p { margin: 0; font-size: 0.85rem; color: var(--muted); flex-basis: 100%; }
+.install { display: flex; flex-wrap: wrap; align-items: center; justify-content: space-between; gap: 12px; }
+.install p { margin: 0; flex: 1 1 18rem; min-width: 0; }
+/* En mode application installée : pas de marge au-dessus de la barre d'état */
+@media (display-mode: standalone) { .wrap { padding-block-start: calc(12px + env(safe-area-inset-top, 0px)); } }
 </style>
 </head>
 <body>
@@ -143,6 +155,14 @@ input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px s
   </header>
 
   <div id="notice" class="notice" hidden></div>
+
+  <div id="installBar" class="panel install" hidden>
+    <p id="installText">Installez « Mon budget » sur cet appareil pour l'ouvrir comme une application, même sans connexion.</p>
+    <div class="actions">
+      <button class="btn small" id="installBtn" type="button" hidden>Installer l'application</button>
+      <button class="btn ghost small" id="installLater" type="button">Plus tard</button>
+    </div>
+  </div>
 
   <div class="grid">
     <div class="col">
@@ -238,6 +258,7 @@ input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px s
     "Maison", "Cadeaux", "Enfants", "Abonnements", "Restaurants", "Divers"];
   const EUR = new Intl.NumberFormat("fr-FR", { style: "currency", currency: "EUR" });
   const $ = (id) => document.getElementById(id);
+  const isTouch = matchMedia("(pointer: coarse)").matches;
 
   const pad = (n) => String(n).padStart(2, "0");
   const iso = (d) => `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
@@ -497,10 +518,17 @@ input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px s
   });
 
   // Export / import
-  $("exportBtn").addEventListener("click", () => {
-    const blob = new Blob([JSON.stringify({ app: "mon-budget", version: 1, exporteLe: new Date().toISOString(), ...data }, null, 2)], { type: "application/json" });
+  $("exportBtn").addEventListener("click", async () => {
+    const json = JSON.stringify({ app: "mon-budget", version: 1, exporteLe: new Date().toISOString(), ...data }, null, 2);
+    const name = `budget-sauvegarde-${today()}.json`;
+    // Sur téléphone, le menu de partage permet d'envoyer le fichier (mail, Drive, messagerie…).
+    const file = typeof File === "function" ? new File([json], name, { type: "application/json" }) : null;
+    if (file && isTouch && navigator.canShare?.({ files: [file] })) {
+      try { await navigator.share({ files: [file], title: "Sauvegarde Mon budget" }); toast("Sauvegarde partagée"); return; }
+      catch (err) { if (err?.name === "AbortError") return; /* sinon : téléchargement classique */ }
+    }
     const a = document.createElement("a");
-    a.href = URL.createObjectURL(blob); a.download = `budget-sauvegarde-${today()}.json`;
+    a.href = URL.createObjectURL(new Blob([json], { type: "application/json" })); a.download = name;
     document.body.appendChild(a); a.click(); a.remove();
     setTimeout(() => URL.revokeObjectURL(a.href), 1000);
     toast("Sauvegarde exportée");
@@ -528,6 +556,35 @@ input:focus-visible, select:focus-visible, button:focus-visible { outline: 2px s
 
   // Autre onglet ouvert sur la même page
   window.addEventListener("storage", (e) => { if (e.key === STORAGE_KEY) { load(); refreshMonth(); } });
+
+  // Installation (PWA)
+  const isStandalone = matchMedia("(display-mode: standalone)").matches || navigator.standalone === true;
+  const isIOS = /iphone|ipad|ipod/i.test(navigator.userAgent) || (navigator.platform === "MacIntel" && navigator.maxTouchPoints > 1);
+  let installPrompt = null;
+  const installDismissed = () => { try { return localStorage.getItem("mon-budget.install-plus-tard") === "1"; } catch { return false; } };
+  window.addEventListener("beforeinstallprompt", (e) => {
+    e.preventDefault(); installPrompt = e;
+    if (!installDismissed()) { $("installBtn").hidden = false; $("installBar").hidden = false; }
+  });
+  if (isIOS && !isStandalone && !installDismissed()) {
+    $("installText").textContent = "Pour installer « Mon budget » : touchez le bouton Partager de Safari, puis « Sur l'écran d'accueil ».";
+    $("installBar").hidden = false;
+  }
+  $("installBtn").addEventListener("click", async () => {
+    if (!installPrompt) return;
+    installPrompt.prompt();
+    const { outcome } = await installPrompt.userChoice;
+    installPrompt = null; $("installBar").hidden = true;
+    if (outcome === "accepted") toast("Application installée");
+  });
+  $("installLater").addEventListener("click", () => {
+    $("installBar").hidden = true;
+    try { localStorage.setItem("mon-budget.install-plus-tard", "1"); } catch { /* préférence non retenue */ }
+  });
+  window.addEventListener("appinstalled", () => { $("installBar").hidden = true; });
+  if ("serviceWorker" in navigator && location.protocol !== "file:") {
+    navigator.serviceWorker.register("sw.js").catch(() => notice("Le mode hors connexion n'a pas pu être activé. L'application fonctionne quand même en ligne."));
+  }
 
   // Démarrage
   load();
